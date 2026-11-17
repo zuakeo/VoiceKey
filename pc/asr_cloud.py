@@ -25,8 +25,7 @@ GROQ_MODEL = os.environ.get("VK_GROQ_MODEL", "whisper-large-v3")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-# 默认提示词不带任何领域词。想提高你自己行业的识别率，
-# 就在 pc/hotwords.txt 里一行写一个词，会自动拼进来。
+# 代码里不放任何个人/行业词；行业词只写在 hotwords.txt（不进仓库）
 DEFAULT_PROMPT = "以下是简体中文口语听写，请加自然标点。"
 
 
@@ -58,7 +57,15 @@ def prompt_text():
     if os.path.exists(p):
         try:
             with open(p, encoding="utf-8") as f:
-                words = [w.strip() for w in f.read().replace("、", "\n").splitlines() if w.strip()]
+                words = []
+                # 先按行去掉注释，再拆顿号 —— 顺序反了会把注释里的顿号当成词
+                for line in f.read().splitlines():
+                    if line.strip().startswith("#"):
+                        continue
+                    for w in line.replace("、", "\n").splitlines():
+                        w = w.strip()
+                        if w:
+                            words.append(w)
             if words:
                 return ("以下是简体中文口语听写，加自然标点，数字和英文单词保持完整。常用词："
                         + "、".join(words) + "。")

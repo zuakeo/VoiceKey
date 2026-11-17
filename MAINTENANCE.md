@@ -161,7 +161,7 @@ adb shell su -c 'cd /sdcard/Android/data/<包名>/files && mkdir -p old && mv *.
 姿势没问题还错，按这个顺序处理：
 
 1. **同音字/专有名词** → 加到 `pc/terms.py` 的 `CN_FIX`（中文整串替换）或 `RULES`（正则）
-2. **行业词没识别对** → 自建 `pc/hotwords.txt`（一行一个词，会拼进 whisper 的 prompt）
+2. **行业词没识别对** → 自建 `pc/hotwords.txt`（一行一个词，支持 `#` 注释分组，会拼进 whisper 的 prompt）
 3. **整体不准** → 换模型：`VK_GROQ_MODEL=whisper-large-v3`（默认已是）
 4. **英文词被音译** → 只能靠纠错表，模型换再大也一样
 

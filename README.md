@@ -85,7 +85,7 @@ VoiceKey/
 │   ├── asr_cloud.py            Groq / DeepSeek 云端识别
 │   ├── polish.py               只补标点的 AI 整理
 │   ├── terms.py                专有名词 / 同音字纠错表
-│   ├── hotwords.txt            （自建，可选）行业热词，一行一个
+│   ├── hotwords.txt            （自建，可选）# 分组注释，一行一个词
 │   ├── supervisor.py           守护：8765 挂了自动重启
 │   └── start-silent.vbs        静默启动（Windows 开机自启用）
 └── MAINTENANCE.md              维护手册（排查、改配置、升级）
@@ -167,7 +167,7 @@ adb reboot
 
 | 想改什么 | 改哪里 | 要重启吗 |
 |---|---|---|
-| 热词 | 自建 `pc/hotwords.txt`，一行一个行业词（不建也行） | 不用 |
+| 热词 | 自建 `pc/hotwords.txt`：一行一个词，支持 `#` 注释分组（不建也行） | 不用 |
 | 错字纠正 | `pc/terms.py` 里的 `CN_FIX` / `RULES` | 重启电脑端服务 |
 | 识别模型 | 环境变量 `VK_GROQ_MODEL`（默认 `whisper-large-v3`） | 重启服务 |
 | 关掉 AI 补标点 | `VK_POLISH=0` | 重启服务 |

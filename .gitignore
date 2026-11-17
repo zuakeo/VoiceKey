@@ -1,0 +1,35 @@
+# 构建产物
+build/
+dist/
+magisk/system/
+
+# 电脑端运行数据
+pc/out/
+pc/inbox/
+pc/.venv/
+pc/*.log
+
+# 密钥（绝对不要提交）
+pc/groq_key.txt
+pc/deepseek_key.txt
+pc/ds_cred.json
+
+# 音频与临时文件
+*.m4a
+*.wav
+*.mp3
+*.png
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv312/
+
+# 系统
+.DS_Store
+Thumbs.db
+_b.sh
+
+# 个人热词（含行业词，绝不提交）
+pc/hotwords.txt

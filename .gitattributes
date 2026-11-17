@@ -1,0 +1,10 @@
+* text=auto
+*.sh  text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.java text eol=lf
+*.xml text eol=lf
+*.js  text eol=lf
+*.vbs text eol=crlf
+*.bat text eol=crlf

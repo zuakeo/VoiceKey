@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
         final SharedPreferences sp = getSharedPreferences("vk", MODE_PRIVATE);
 
         final EditText et = new EditText(this);
-        et.setHint("http://192.168.1.100:8765");
+        et.setHint("http://192.0.2.10:8765");
         et.setTextSize(15);
         et.setSingleLine(true);
         et.setText(sp.getString("server", ""));

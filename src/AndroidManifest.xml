@@ -9,12 +9,23 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <!-- Android 11 的包可见性：不声明就 getPackageInfo("com.zuakeo.inknote") 会抛
+         NameNotFoundException，拿不到便签的 uid，也就写不进它的私有收件箱。
+         实测报错是「pushToInbox: 查不到便签的 uid」，录音只能回落公共目录。 -->
+    <queries>
+        <package android:name="com.zuakeo.inknote" />
+    </queries>
 
     <application
         android:label="语音键"
         android:persistent="true"
         android:allowBackup="false"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
 
         <activity
@@ -29,7 +40,7 @@
 
         <activity
             android:name=".WakeActivity"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/WakeTheme"
             android:noHistory="true"
             android:excludeFromRecents="true"

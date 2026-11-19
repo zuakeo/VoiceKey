@@ -27,7 +27,11 @@ def get_key():
                 return f.read().strip()
         except OSError:
             return ""
-    return ""
+    try:                      # 统一走 DPAPI 密文；旧明文会被加密并粉碎
+        import vault
+        return vault.load("deepseek_key")
+    except Exception:
+        return ""
 
 
 def available():

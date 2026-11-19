@@ -26,10 +26,18 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 # 代码里不放任何个人/行业词；行业词只写在 hotwords.txt（不进仓库）
-DEFAULT_PROMPT = "以下是简体中文口语听写，请加自然标点。"
+DEFAULT_PROMPT = "以下是简体中文口语听写，请加自然标点，标点用中文全角（，。？！）。"
 
 
 def _key(filename, envname):
+    """密钥优先用 DPAPI 加密保存；目录里旧的明文文件会自动升级成密文。"""
+    try:
+        import vault
+        got = vault.load(os.path.splitext(filename)[0], envname)
+        if got:
+            return got
+    except Exception:
+        pass
     v = os.environ.get(envname, "").strip()
     if v:
         return v
@@ -43,6 +51,16 @@ def _key(filename, envname):
     return ""
 
 
+def migrate_keys():
+    """启动时把目录里遗留的明文凭据升级成加密存储。"""
+    for fn, env in (("groq" + "_key.txt", "GROQ_API_KEY"),
+                    ("deepseek" + "_key.txt", "DEEPSEEK_API_KEY")):
+        try:
+            _key(fn, env)
+        except Exception:
+            pass
+
+
 def groq_key():
     return _key("groq_key.txt", "GROQ_API_KEY")
 
@@ -52,9 +70,15 @@ def available():
 
 
 def prompt_text():
-    """热词文件优先，一行一个词，拼成 whisper 的 prompt。"""
-    p = os.path.join(HERE, "hotwords.txt")
-    if os.path.exists(p):
+    """热词：设备推过来的优先（以手机端为准），没有才用本机 hotwords.txt。
+
+    一行一个词，也支持顿号分隔；# 开头是注释。
+    """
+    device = os.path.join(HERE, "hotwords_from_device.txt")
+    local = os.path.join(HERE, "hotwords.txt")
+    for p in (device, local):
+        if not os.path.exists(p):
+            continue
         try:
             with open(p, encoding="utf-8") as f:
                 words = []
@@ -161,3 +185,36 @@ def transcribe(audio_path, timeout=90):
             return ""
         return "".join(s.get("text", "") for s in keep).strip()
     return (payload.get("text") or "").strip()
+
+def hotwords_snapshot():
+    """当前生效的热词（顿号连接）和它的修改时间，供手机端做双向同步。"""
+    device = os.path.join(HERE, "hotwords_from_device.txt")
+    local = os.path.join(HERE, "hotwords.txt")
+    src = device if os.path.exists(device) else local
+    text = ""
+    try:
+        if os.path.exists(src):
+            with open(src, encoding="utf-8") as f:
+                words = []
+                for line in f.read().splitlines():
+                    if line.strip().startswith("#"):
+                        continue
+                    for w in line.replace("、", "\n").splitlines():
+                        w = w.strip()
+                        if w:
+                            words.append(w)
+                text = "、".join(words)
+    except OSError:
+        pass
+    mtime = 0.0
+    for p in (device, local):
+        try:
+            mtime = max(mtime, os.path.getmtime(p))
+        except OSError:
+            pass
+    return text, mtime
+
+def hotwords_hash(text):
+    """热词内容的短哈希：内容没变版本就不变，比 mtime 准（改一下空格不算变）。"""
+    import hashlib
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]

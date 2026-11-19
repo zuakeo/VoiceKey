@@ -82,12 +82,18 @@ VoiceKey/
 ├── magisk/                     Magisk 模块：把 APK 变成系统常驻应用 + 守护脚本
 ├── pc/                         电脑端
 │   ├── inkvoice.py             HTTP 收件 + 全流程编排
+│   ├── uploader.py             上传接口：请求级保护、clip_id 语义、幂等
+│   ├── inputguard.py           自动输入前的焦点控件判定（UIA + MSAA）
 │   ├── asr_cloud.py            Groq / DeepSeek 云端识别
 │   ├── polish.py               只补标点的 AI 整理
+│   ├── punct.py                中文标点本地化（半角 → 全角）
 │   ├── terms.py                专有名词 / 同音字纠错表
+│   ├── vault.py                凭据加密（DPAPI）
 │   ├── hotwords.txt            （自建，可选）# 分组注释，一行一个词
 │   ├── supervisor.py           守护：8765 挂了自动重启
-│   └── start-silent.vbs        静默启动（Windows 开机自启用）
+│   ├── start-silent.vbs        静默启动（Windows 开机自启用）
+│   ├── audit.py                51 项自检
+│   └── selftest_*.py           上传保护 / 输入判定 / 崩溃恢复 / 端到端
 └── MAINTENANCE.md              维护手册（排查、改配置、升级）
 ```
 
@@ -192,6 +198,13 @@ adb reboot
 13. **`pythonw` 调 ffmpeg 会闪黑窗**：GUI 进程的子进程默认新开一个控制台，每个 `subprocess` 都要带 `creationflags=CREATE_NO_WINDOW`，否则每次说话屏幕上都闪一下。
 14. **上传体积直接决定体感速度**：16k wav 15 秒要 463KB，压成 24kbps mp3 只有 43KB，识别结果一字不差；慢网络上能省好几秒。
 15. **Groq 偶发 `RemoteDisconnected` / 429**：必须重试（本项目重试 3 次、退避 1.5s），否则用户看到的是「这次没出字」，会误以为按键坏了。
+16. **返回码语义要和客户端对齐**：服务端「已入队」回 `202` 是对的，但客户端写的是 `code == 200`，
+    于是成功被当成失败、录音被重复塞进兜底队列。要么两端都接受 2xx，要么就像本项目这样先让步回 200。
+17. **`python x.py` 启动时 `import x` 会执行第二遍**：模块名是 `__main__`，`import x` 又建了一个模块对象，
+    于是出现两份全局状态（这里是两份任务队列，上传进的那份没人消费）。
+    入口处 `sys.modules.setdefault("x", sys.modules["__main__"])` 一行解决。
+18. **`/sdcard` 的权限是 FUSE 合成的，`chmod` 无效**：root 写进去的文件固定 `root:everybody 660`，
+    别的应用读不到。跨应用交付别走文件系统，走 MediaStore 或 ContentProvider。
 
 ## 没出字？按这个顺序查
 

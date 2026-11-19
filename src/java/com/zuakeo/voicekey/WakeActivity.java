@@ -19,6 +19,10 @@ import android.view.WindowManager;
  * 起来服务后 1.2 秒自动 finish，屏幕上什么都看不到，也不影响锁屏/息屏。
  */
 public class WakeActivity extends Activity {
+    /** 现在 manifest 里是 exported=false，外部应用已经起不来它了；
+     *  这个节流保留作为兜底（比如 root 脚本误触发），10 秒内只受理一次。 */
+    private static long lastStart = 0;
+
     private final Handler h = new Handler(Looper.getMainLooper());
     private final Runnable finishTask = new Runnable() {
         @Override public void run() { finish(); overridePendingTransition(0, 0); }
@@ -27,6 +31,13 @@ public class WakeActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        long now = System.currentTimeMillis();
+        if (now - lastStart < 10000) {
+            finish();
+            overridePendingTransition(0, 0);
+            return;
+        }
+        lastStart = now;
         try {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
             lp.width = 1;

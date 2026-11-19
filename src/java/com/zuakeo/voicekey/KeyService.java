@@ -6,16 +6,19 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.BroadcastReceiver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.media.MediaRecorder;
+import android.net.Uri;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
+import android.provider.MediaStore;
 import android.util.Log;
 
 import java.io.BufferedReader;
@@ -48,17 +51,23 @@ import java.util.Locale;
  */
 public class KeyService extends Service {
     public static final String TAG = "VoiceKey";
+
+    /** 正在投递的文件名，防 onRelease 与 retryPending 并发重复投递。 */
+    private static final java.util.Set<String> INFLIGHT =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
     public static final String ACTION_STATE = "com.zuakeo.voicekey.STATE";
     public static final String EXTRA_STATE = "state";
 
     private static final int EV_KEY = 1;
-    /** ↓↓↓ 适配你自己的设备只需要改这两行 ↓↓↓
-     *  设备节点：adb shell su -c 'getevent -l' 看按键落在哪个 eventN
-     *  键码：    getevent 输出里的 code（例：EV_KEY KEY_AI → 766） */
-    private static final String EV_PATH = "/dev/input/event2";
     private static final int CODE_MOKEY = 766;
-    /** ↑↑↑ 适配你自己的设备只需要改这两行 ↑↑↑ */
     private static final int MIN_RECORD_MS = 500;
+
+    /** 震动节奏：靠长短和次数区分，不靠数拍子。
+     *  开始 = 一记长震；结束 = 两记短震；太短 = 三记极短；出错 = 两记重震。 */
+    private static final long[] VIB_START = {0, 200};
+    private static final long[] VIB_STOP = {0, 80, 80, 80};
+    private static final long[] VIB_SHORT = {0, 30, 60, 30, 60, 30};
+    private static final long[] VIB_ERROR = {0, 300, 150, 300};
 
     private static final int STATE_IDLE = 0;
     private static final int STATE_REC = 1;
@@ -200,10 +209,56 @@ public class KeyService extends Service {
         return START_STICKY;
     }
 
+    /**
+     * 找到侧键所在的事件节点。不写死 event2：
+     * 从 /proc/bus/input/devices 里找名字叫 gpio-keys（或带 mokey）的那个。
+     * 找不到再退回 event2（本机实测就是它）。
+     */
+    private String resolveEventNode() {
+        try {
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", "cat /proc/bus/input/devices"});
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()));
+            String line;
+            String name = null;
+            String found = null;
+            java.util.regex.Pattern pat = java.util.regex.Pattern.compile("(event\\d+)");
+            while ((line = r.readLine()) != null) {
+                if (line.startsWith("N: Name=")) {
+                    name = line.toLowerCase();
+                } else if (line.startsWith("H: Handlers=") && name != null) {
+                    if (name.contains("gpio-keys") || name.contains("mokey")
+                            || name.contains("keypad")) {
+                        java.util.regex.Matcher m = pat.matcher(line);
+                        if (m.find()) {
+                            found = "/dev/input/" + m.group(1);
+                            break;
+                        }
+                    }
+                    name = null;
+                }
+            }
+            try { p.waitFor(); } catch (InterruptedException ignored) { }
+            if (found != null) {
+                Log.i(TAG, "侧键节点：" + found);
+                return found;
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "resolveEventNode", t);
+        }
+        // 退回写死的节点是最后一招：明确记 WARN + 通知里说清楚，
+        // 免得换设备后「按了没反应」还查不出原因。
+        Log.w(TAG, "没找到 gpio-keys，退回 /dev/input/event2（可能不是侧键所在节点）");
+        notifyState("侧键节点未识别，暂用 event2");
+        return "/dev/input/event2";
+    }
+
     private void readLoop() {
+        String node = resolveEventNode();
         while (running) {
             try {
-                suProcess = Runtime.getRuntime().exec(new String[]{"su", "-c", "cat " + EV_PATH});
+                suProcess = Runtime.getRuntime().exec(new String[]{"su", "-c", "cat " + node});
                 InputStream is = suProcess.getInputStream();
                 byte[] buf = new byte[24];
                 notifyState("监听中（root 已就绪）");
@@ -255,7 +310,7 @@ public class KeyService extends Service {
         if (recorder != null) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             notifyState("缺少录音权限，请打开 App 授权");
-            buzz(new long[]{0, 80, 80, 80, 80, 80});
+            buzz(VIB_ERROR);
             return;
         }
         // 还没点亮过麦克风：这一次允许临时亮屏把权限换出来，之后就不再亮屏了
@@ -307,7 +362,7 @@ public class KeyService extends Service {
             recorder = r;
             pressAt = SystemClock.elapsedRealtime();
             micBlessed = true;
-            buzz(50);
+            buzz(VIB_START);
             notifyState("● 录音中…");
         } catch (Throwable t) {
             Log.e(TAG, "onPress", t);
@@ -320,7 +375,7 @@ public class KeyService extends Service {
                 wakeSelf();
             }
             notifyState("录音启动失败：" + t.getClass().getSimpleName());
-            buzz(new long[]{0, 80, 80, 80, 80, 80});
+            buzz(VIB_ERROR);
         }
     }
 
@@ -334,11 +389,11 @@ public class KeyService extends Service {
         File f = currentPath == null ? null : new File(currentPath);
         if (dur < MIN_RECORD_MS) {
             if (f != null && f.exists()) f.delete();
-            buzz(new long[]{0, 25, 60, 25});
+            buzz(VIB_SHORT);
             notifyState("按住太短，已丢弃");
         } else {
             long kb = (f != null && f.exists()) ? f.length() / 1024 : 0;
-            buzz(new long[]{0, 35, 70, 35});
+            buzz(VIB_STOP);
             notifyState("已保存 " + (f != null ? f.getName() : "") + "（" + kb + "KB，" + (dur / 1000.0) + "秒）");
             if (f != null) uploadAsync(f);
         }
@@ -368,8 +423,55 @@ public class KeyService extends Service {
         } catch (Throwable ignored) { }
     }
 
+    private static boolean tlsReady = false;
+
+    /** 电脑端开了 HTTPS 时，只认配置里那张证书的指纹。 */
+    private void installTls() {
+        if (tlsReady) return;
+        String pin = getSharedPreferences("vk", MODE_PRIVATE).getString("tls_pin", "");
+        if (pin == null || pin.trim().isEmpty()) {
+            tlsReady = true;
+            return;
+        }
+        final String want = pin.trim().toLowerCase();
+        try {
+            javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance("TLS");
+            sc.init(null, new javax.net.ssl.TrustManager[]{
+                    new javax.net.ssl.X509TrustManager() {
+                        public void checkClientTrusted(java.security.cert.X509Certificate[] c,
+                                                       String a) { }
+                        public void checkServerTrusted(java.security.cert.X509Certificate[] chain,
+                                                       String a)
+                                throws java.security.cert.CertificateException {
+                            try {
+                                java.security.MessageDigest md =
+                                        java.security.MessageDigest.getInstance("SHA-256");
+                                byte[] d = md.digest(chain[0].getEncoded());
+                                StringBuilder sb = new StringBuilder();
+                                for (byte b : d) sb.append(String.format("%02x", b));
+                                if (!sb.toString().equalsIgnoreCase(want)) {
+                                    throw new java.security.cert.CertificateException("pin mismatch");
+                                }
+                            } catch (java.security.NoSuchAlgorithmException e) {
+                                throw new java.security.cert.CertificateException(e);
+                            }
+                        }
+                        public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                            return new java.security.cert.X509Certificate[0];
+                        }
+                    }
+            }, new java.security.SecureRandom());
+            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+            javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier((h2, s2) -> true);
+            tlsReady = true;
+        } catch (Throwable t) {
+            Log.e(TAG, "installTls", t);
+        }
+    }
+
     /** 同步上传一个文件，成功返回 true。 */
     private boolean uploadOne(File f) {
+        installTls();
         String base = getSharedPreferences("vk", MODE_PRIVATE).getString("server", "");
         if (base == null || base.trim().isEmpty()) return false;
         HttpURLConnection c = null;
@@ -384,6 +486,14 @@ public class KeyService extends Service {
             c.setReadTimeout(20000);
             c.setFixedLengthStreamingMode((int) f.length());
             c.setRequestProperty("Content-Type", "application/octet-stream");
+            String cid = f.getName();
+            int dt = cid.lastIndexOf('.');
+            if (dt > 0) cid = cid.substring(0, dt);
+            c.setRequestProperty("X-Clip-Id", cid);
+            String tok = getSharedPreferences("vk", MODE_PRIVATE).getString("token", "");
+            if (tok != null && !tok.trim().isEmpty()) {
+                c.setRequestProperty("Authorization", "Bearer " + tok.trim());
+            }
             OutputStream os = c.getOutputStream();
             FileInputStream is = new FileInputStream(f);
             byte[] buf = new byte[8192];
@@ -393,8 +503,11 @@ public class KeyService extends Service {
             os.close();
             is.close();
             int code = c.getResponseCode();
-            failStreak = (code == 200) ? 0 : failStreak + 1;
-            return code == 200;
+            // 接受整个 2xx 家族。服务端为了表示「已入队」可能回 202，
+            // 以前只认 200，结果成功的上传被判失败，录音被重复塞进记事本。
+            boolean ok = (code >= 200 && code < 300);
+            failStreak = ok ? 0 : failStreak + 1;
+            return ok;
         } catch (Throwable t) {
             failStreak++;
             Log.e(TAG, "upload", t);
@@ -404,25 +517,321 @@ public class KeyService extends Service {
         }
     }
 
-    /** 把录音 POST 到电脑。成功移到 sent/，失败留在原地等重试。 */
+    /** 查电脑上这个 clip 是否已经在队列/已完成。用于「上传响应丢了」的场景。 */
+    private boolean alreadyOnPc(String base, String clip) {
+        HttpURLConnection c = null;
+        try {
+            String root = base.trim();
+            if (root.endsWith("/")) root = root.substring(0, root.length() - 1);
+            c = (HttpURLConnection) new URL(
+                    root + "/jobs/" + java.net.URLEncoder.encode(clip, "UTF-8")).openConnection();
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(5000);
+            String tok = getSharedPreferences("vk", MODE_PRIVATE).getString("token", "");
+            if (tok != null && !tok.trim().isEmpty()) {
+                c.setRequestProperty("Authorization", "Bearer " + tok.trim());
+            }
+            if (c.getResponseCode() != 200) return false;
+            InputStream is = c.getInputStream();
+            StringBuilder sb = new StringBuilder();
+            byte[] buf = new byte[2048];
+            int n;
+            while ((n = is.read(buf)) > 0) sb.append(new String(buf, 0, n, "UTF-8"));
+            is.close();
+            // 服务端对不存在的任务返回 {}，存在的至少带 state 字段
+            return sb.indexOf("\"state\"") >= 0;
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** 有没有外网。
+     *  优先问系统；拿不到（系统应用换 APK 后新权限常常没注册）就用 DNS 端口探活兜底。 */
+    private boolean hasInternet() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                android.net.Network n = cm.getActiveNetwork();
+                if (n != null) {
+                    android.net.NetworkCapabilities cap = cm.getNetworkCapabilities(n);
+                    if (cap != null) {
+                        return cap.hasCapability(
+                                        android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                && cap.hasCapability(
+                                        android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // 没权限或系统不给，走下面的探活
+        }
+        // 探三个公共 DNS：连得上就算在线（总共最多约 1.5 秒）
+        String[] hosts = {"223.5.5.5", "114.114.114.114", "8.8.8.8"};
+        for (String h : hosts) {
+            java.net.Socket s = new java.net.Socket();
+            try {
+                s.connect(new java.net.InetSocketAddress(h, 53), 500);
+                return true;
+            } catch (Throwable ignored) {
+            } finally {
+                try { s.close(); } catch (Throwable ignored) { }
+            }
+        }
+        return false;
+    }
+
+    /** 录音交给便签 App。
+     *  首选直接写进它的私有收件箱 /data/data/com.zuakeo.inknote/files/inbox/ 并 chown 成它的 uid；
+     *  便签没装或没 root 时，退回 /sdcard/InkNote/pending（便签会用 root 来拉）。 */
+    private boolean toInkNote(File f) {
+        String name = f.getName();
+        if (name.startsWith("rec_")) name = "vk_" + name.substring(4);
+        // 先走系统媒体库（最干净，不依赖 root，也不受包可见性影响）
+        if (publishToMediaStore(f, name)) return true;
+        if (pushToInbox(f, name)) return true;
+        return toPublicPending(f, name);
+    }
+
+    /** 把录音插进系统媒体库 Music/VoiceKey，由记事本自己去取。
+     *  自己插自己的文件不需要任何存储权限；对方读只要存储权限。 */
+    private boolean publishToMediaStore(File f, String name) {
+        Uri u = null;
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Audio.Media.DISPLAY_NAME, name);
+            v.put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4");
+            v.put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/VoiceKey");
+            v.put(MediaStore.Audio.Media.IS_PENDING, 1);
+            u = getContentResolver().insert(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, v);
+            if (u == null) return false;
+            OutputStream os = getContentResolver().openOutputStream(u);
+            if (os == null) return false;
+            FileInputStream is = new FileInputStream(f);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+            os.close();
+            is.close();
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.Audio.Media.IS_PENDING, 0);
+            getContentResolver().update(u, done, null, null);
+            f.delete();
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "publishToMediaStore", t);
+            try {
+                if (u != null) getContentResolver().delete(u, null, null);
+            } catch (Throwable ignored) { }
+            return false;
+        }
+    }
+
+    private static final String INK_PKG_DIR = "/data/data/com.zuakeo.inknote";
+
+    /** root 直写便签的私有目录，省掉 FUSE 那道坑。 */
+    /** 便签 App 的 uid：先问 PackageManager，拿不到再借 su 跑 `pm list packages -U`。
+     *  Android 11 有包可见性限制，这台 ROM 加了 <queries> 也仍拿不到，所以必须有第二条路。 */
+    private int inkUid() {
+        try {
+            return getPackageManager().getPackageInfo("com.zuakeo.inknote", 0)
+                    .applicationInfo.uid;
+        } catch (Throwable t) {
+            Log.w(TAG, "PackageManager 查不到便签 uid：" + t);
+        }
+        try {
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", "pm list packages -U com.zuakeo.inknote"});
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append(' ');
+            p.waitFor();
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("uid:(\\d+)").matcher(sb);
+            if (m.find()) return Integer.parseInt(m.group(1));
+            Log.e(TAG, "pm 输出里没有 uid：" + sb);
+        } catch (Throwable t) {
+            Log.e(TAG, "inkUid via su", t);
+        }
+        return -1;
+    }
+
+    private boolean pushToInbox(File f, String name) {
+        int uid = inkUid();
+        if (uid <= 0) {
+            Log.e(TAG, "pushToInbox: 查不到便签的 uid");
+            return false;
+        }
+        String dst = INK_PKG_DIR + "/files/inbox/" + name;
+        // 注意：这里不要在 shell 里用 $(stat ...) 求 uid。实测这条链上它会返回空，
+        // 导致整段被跳过、每次都回落公共目录（root 660，便签读不到）。
+        String cmd = "mkdir -p " + INK_PKG_DIR + "/files/inbox"
+                // 先写 .tmp 再原子改名：便签那边只会看到完整文件（整改 P1-01）
+                + " && cp '" + f.getAbsolutePath() + "' '" + dst + ".tmp'"
+                + " && chown " + uid + ":" + uid + " '" + dst + ".tmp'"
+                + " && chmod 600 '" + dst + ".tmp'"
+                + " && mv -f '" + dst + ".tmp' '" + dst + "'"
+                + " && rm -f '" + f.getAbsolutePath() + "' && echo INKOK";
+        try {
+            Process p;
+            try {
+                p = Runtime.getRuntime().exec(new String[]{"/system/bin/su", "-c", cmd});
+            } catch (Throwable t) {
+                // 极少数 ROM 上 /system/bin/su 不可执行，退回 PATH 里的 su
+                p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+            }
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append(' ');
+            int code = p.waitFor();
+            if (sb.indexOf("INKOK") >= 0) return true;
+            Log.e(TAG, "pushToInbox: exit=" + code + " 输出=" + sb);
+            dumpPushError(cmd, code, sb.toString());
+        } catch (Throwable t) {
+            Log.e(TAG, "pushToInbox", t);
+            dumpPushError(cmd, -1, String.valueOf(t));
+        }
+        return false;
+    }
+
+    /** 把失败现场写到自己的目录，方便 adb 直接看（App 一定有写权限）。 */
+    private void dumpPushError(String cmd, int code, String out) {
+        try {
+            java.io.File f = new java.io.File(
+                    getExternalFilesDir(null), "_vk_push.log");
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(new java.util.Date().toString() + "  exit=" + code
+                    + "\n  cmd=" + cmd + "\n  out=" + out + "\n");
+            w.close();
+        } catch (Throwable ignored) { }
+    }
+
+    /** 老路子：写共享目录，便签靠 root 来拉。 */
+    private boolean toPublicPending(File f, String name) {
+        try {
+            File dir = new File(android.os.Environment.getExternalStorageDirectory(),
+                    "InkNote/pending");
+            if (!dir.exists() && !dir.mkdirs()) return false;
+            File dst = new File(dir, name);
+            if (dst.exists()) dst.delete();
+            if (f.renameTo(dst)) {
+                // renameTo 不走 su 分支，权限保持 660 root:everybody，记事本读不到。
+                // 这里补一句放开读权限（自己创建的文件才有效）。
+                dst.setReadable(true, false);
+                return true;
+            }
+            try {
+                FileInputStream is = new FileInputStream(f);
+                java.io.FileOutputStream os = new java.io.FileOutputStream(dst);
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+                os.close();
+                is.close();
+                f.delete();
+                return true;
+            } catch (Throwable ignored) {
+                // 系统应用换 APK 后新权限可能没注册，走 root 兜底
+            }
+            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c",
+                    "mkdir -p " + dir.getAbsolutePath() + " && cp '" + f.getAbsolutePath()
+                            + "' '" + dst.getAbsolutePath() + "' && chmod 666 '"
+                            + dst.getAbsolutePath() + "' && rm -f '" + f.getAbsolutePath() + "'"});
+            p.waitFor();
+            return dst.exists();
+        } catch (Throwable t) {
+            Log.e(TAG, "toPublicPending", t);
+            return false;
+        }
+    }
+
+    /** 几百毫秒判断电脑在不在。 */
+    private boolean quickReachable(String addr) {
+        try {
+            String a = addr.trim();
+            if (!a.startsWith("http")) a = "http://" + a;
+            String host = new java.net.URL(a).getHost();
+            java.net.Socket s = new java.net.Socket();
+            try {
+                s.connect(new java.net.InetSocketAddress(host, 8765), 500);
+                return true;
+            } finally {
+                try { s.close(); } catch (Throwable ignored) { }
+            }
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 把录音 POST 到电脑。成功移到 sent/，失败留在原地等重试。
+     *  没有外网时不推电脑，直接存进便签的待转写目录，等联网后由便签 App 转文字。 */
     private void uploadAsync(final File f) {
         final String base = getSharedPreferences("vk", MODE_PRIVATE).getString("server", "");
         if (base == null || base.trim().isEmpty()) {
-            notifyState("已保存（未配置电脑地址）");
+            // 没配电脑地址：能上网就交给便签，不能就留在本机等重试
+            if (hasInternet() && toInkNote(f)) {
+                notifyState("已存下（未配置电脑地址）");
+                toast("已存下（未配置电脑地址）");
+            } else {
+                notifyState("已保存（未配置电脑地址）");
+            }
             return;
         }
         Thread t = new Thread(() -> {
-            boolean ok = uploadOne(f);
-            if (ok) {
-                notifyState("已推送 " + f.getName());
-                toast("已推送 " + f.getName());
-                moveToSent(f);
-            } else {
-                notifyState("推送失败，网络恢复后自动重试");
-                toast("推送失败，稍后自动重试");
+            // 同一个文件可能被 onRelease 和 retryPending 同时处理（网络抖动时会撞上），
+            // 撞上就会「电脑收一份、记事本又存一份」。这里按文件名做在途去重。
+            if (!INFLIGHT.add(f.getName())) return;
+            try {
+                deliver(f);
+            } finally {
+                INFLIGHT.remove(f.getName());
             }
         }, "upload");
         t.start();
+    }
+
+    /** 真正的投递逻辑：先电脑，再记事本。抽出来是为了让上面的 try/finally 包住。 */
+    private void deliver(final File f) {
+        {
+            final String base = getSharedPreferences("vk", MODE_PRIVATE).getString("server", "");
+            // 电脑在内网，和外网通不通是两件事；以前先判 hasInternet()，
+            // 一旦 Wi-Fi 被判「无外网」，录音就直接进了手机记事本，电脑收不到。
+            String clip = f.getName();
+            int dot = clip.lastIndexOf('.');
+            if (dot > 0) clip = clip.substring(0, dot);
+            if (quickReachable(base) && uploadOne(f)) {
+                notifyState("已推送 " + f.getName());
+                toast("已推送 " + f.getName());
+                moveToSent(f);
+                return;
+            }
+            // 上传没拿到成功响应 ≠ 电脑没收到：可能已经入队，只是响应在网络上丢了。
+            // 这时再问一次任务状态，确认到了就按成功处理，避免电脑一份、记事本又一份。
+            if (alreadyOnPc(base, clip)) {
+                notifyState("已推送 " + f.getName() + "（电脑已确认收到）");
+                moveToSent(f);
+                return;
+            }
+            // 电脑没连上（没开机 / 不在同一网 / 没网）→ 一律交给记事本排队。
+            // 以前这里是 `hasInternet() && toInkNote(f)`，没网时就不交了，
+            // 录音只能躺在 recDir 里等 retryPending，用户在记事本里什么也看不到。
+            // 记事本的 SyncService 自己会处理「没网先等着」：
+            // 文件留在 inbox，通知栏显示「有 N 条录音等着联网转写」，联网后自动转写。
+            if (toInkNote(f)) {
+                boolean online = hasInternet();
+                notifyState(online ? "电脑没连上，已存进记事本" : "没网，已存进记事本（联网后自动转写）");
+                toast(online ? "电脑没连上，已存进记事本" : "没网，已存进记事本");
+            } else {
+                notifyState("推送失败，稍后自动重试");
+                toast("推送失败，稍后自动重试");
+            }
+        }
     }
 
     /** 网络恢复 / 周期性：把积压的录音补推上去。 */

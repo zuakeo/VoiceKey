@@ -4,12 +4,13 @@
 不打印任何令牌/密钥内容，只输出「一致 / 不一致」和指纹前 8 位。
 """
 import hashlib
+import os
 import re
 import ssl
 import subprocess
 import sys
 
-PC = r"pc"
+PC = os.path.dirname(os.path.abspath(__file__))
 APPS = [("voicekey", "/data/data/com.zuakeo.voicekey/shared_prefs/vk.xml"),
         ("inknote", "/data/data/com.zuakeo.inknote/shared_prefs/ink.xml")]
 

@@ -16,7 +16,7 @@
 
 param([switch]$NoPause)
 
-$pc  = "pc"
+$pc  = $PSScriptRoot
 $py  = Join-Path $pc ".venv312\Scripts\python.exe"
 $log = Join-Path $pc "out\fix_acl.log"
 

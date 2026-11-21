@@ -7,7 +7,7 @@
 #
 # Nothing is changed here. To fix the ACL findings run:  python harden_acl.py --apply
 
-$pc = "pc"
+$pc = $PSScriptRoot
 $py = Join-Path $pc ".venv312\Scripts\python.exe"
 
 Write-Host "== BitLocker ==" -ForegroundColor Cyan
